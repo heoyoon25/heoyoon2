@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
 
 # SciKit-Learn 및 기타 모듈 가져오기 (설치 필요: scikit-learn, matplotlib, seaborn)
 try:
