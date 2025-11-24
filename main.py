@@ -188,3 +188,46 @@ def main():
 
 if __name__ == '__main__':
     main()
+@st.cache_data(show_spinner="데이터 전처리 중...")
+def preprocess_data(df):
+    """로드된 데이터프레임을 받아 전처리를 수행합니다."""
+    
+    # 1. 컬럼명 정제 및 통일 (오류 발생 가능성 줄이기)
+    # 기존 코드의 정규식을 유지하되, 모든 컬럼을 통과시킵니다.
+    df.columns = df.columns.str.lower().str.replace(' ', '_', regex=False).str.replace('-', '_', regex=False).str.replace('[^a-z0-9_]', '', regex=True)
+    
+    # 2. 컬럼명 최종 고유화 (중복 오류 방지)
+    cols = df.columns.tolist()
+    seen = {}
+    new_cols = []
+    for item in cols:
+        counter = 1
+        new_item = item
+        while new_item in seen:
+            new_item = item + '_' + str(counter)
+            counter += 1
+        seen[new_item] = True
+        new_cols.append(new_item)
+    df.columns = new_cols
+    
+    # 3. 핵심 변수 정의 및 선택 (컬럼명 고유화 후 진행)
+    required_cols = ['loan_amount', 'risk_score', 'dti', 'state', 'loan_title', 'emp_length', 'loan_status']
+    available_cols = [col for col in required_cols if col in df.columns]
+    df_model = df[available_cols].copy()
+
+    # (이하 결측치 처리 및 데이터 타입 변환 로직은 이전과 동일)
+
+    numeric_cols = ['loan_amount', 'risk_score', 'dti']
+    categorical_cols = ['state', 'loan_title', 'emp_length']
+
+    for col in numeric_cols:
+        if col in df_model.columns:
+            df_model[col] = pd.to_numeric(df_model[col], errors='coerce')
+            median_val = df_model[col].median()
+            df_model[col] = df_model[col].fillna(median_val if not pd.isna(median_val) else 0)
+
+    for col in categorical_cols:
+        if col in df_model.columns:
+            df_model[col] = df_model[col].astype('category').cat.add_categories('Missing').fillna('Missing')
+    
+    return df_model
