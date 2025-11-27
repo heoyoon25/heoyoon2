@@ -477,14 +477,14 @@ elif st.session_state.step == 3:
 
     st.caption(f"설정 요약: 깊이 {tree_depth}, 기준 {criterion_option}")
     st.caption("🔧 **전처리**: Label Encoding(범주형), Imputation(수치형)")
-
-        with col3:
-            st.markdown("##### ⚖️ Hybrid 모델 (결합 모형)")
-            st.caption("Logit + Tree 예측 결과 가중치")
-            reg_weight = st.slider("Logit 가중치", 0.0, 1.0, st.session_state.models["mixed_weights"]["regression"], 0.1, key="reg_weight")
-            st.session_state.models["mixed_weights"]["regression"] = reg_weight
-            st.session_state.models["mixed_weights"]["decision_tree"] = 1.0 - reg_weight
-            st.caption(f"비율: Logit {int(reg_weight*100)}% : Tree {int((1-reg_weight)*100)}%")
+    
+    with col3:
+        st.markdown("##### ⚖️ Hybrid 모델 (결합 모형)")
+        st.caption("Logit + Tree 예측 결과 가중치")
+        reg_weight = st.slider("Logit 가중치", 0.0, 1.0, st.session_state.models["mixed_weights"]["regression"], 0.1, key="reg_weight")
+        st.session_state.models["mixed_weights"]["regression"] = reg_weight
+        st.session_state.models["mixed_weights"]["decision_tree"] = 1.0 - reg_weight
+        st.caption(f"비율: Logit {int(reg_weight*100)}% : Tree {int((1-reg_weight)*100)}%")
 
         st.divider()
         
