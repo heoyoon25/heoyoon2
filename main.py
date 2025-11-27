@@ -439,18 +439,44 @@ elif st.session_state.step == 3:
             st.caption("🔧 **전처리**: OHE(범주형), StandardScaler(수치형)")
 
         with col2:
-            st.markdown("##### 🌳 Tree 모델 (의사결정나무)")
-            test_size_dt = st.slider(
-                "Tree 테스트 데이터 비율", 
-                0.1, 0.4, st.session_state.models["test_size_dt"], 0.05, 
-                key="test_size_dt",
-                help="Tree 모델 학습 시 사용할 테스트 데이터의 비율입니다."
-            )
-            st.session_state.models["test_size_dt"] = test_size_dt
-            
-            tree_depth = st.slider("최대 깊이 (Max Depth)", 1, 20, 5, key="tree_depth")
-            st.caption(f"깊이 제한: {tree_depth}")
-            st.caption("🔧 **전처리**: Label Encoding(범주형), Imputation(수치형)")
+    st.markdown("##### 🌳 Tree 모델 (의사결정나무)")
+    
+    # 1. 테스트 데이터 비율 설정
+    test_size_dt = st.slider(
+        "Tree 테스트 데이터 비율", 
+        0.1, 0.4, st.session_state.models.get("test_size_dt", 0.25), 0.05, 
+        key="test_size_dt",
+        help="Tree 모델 학습 시 사용할 테스트 데이터의 비율입니다."
+    )
+    st.session_state.models["test_size_dt"] = test_size_dt
+    
+    # 2. 최대 깊이 설정
+    tree_depth = st.slider("최대 깊이 (Max Depth)", 1, 20, 5, key="tree_depth")
+    st.session_state.models["tree_depth"] = tree_depth # 세션 상태에 저장 (필요시)
+
+    # 3. Criterion (분할 기준) 선택 - 요청사항 반영 (entropy 포함)
+    criterion_option = st.selectbox(
+        "분할 기준 (Criterion)",
+        ["gini", "entropy", "log_loss"],
+        index=0, # 기본값: gini
+        key="tree_criterion",
+        help="지니 계수(gini) 또는 엔트로피(entropy) 등을 기준으로 분할 품질을 측정합니다."
+    )
+    st.session_state.models["tree_criterion"] = criterion_option
+
+    # 4. Splitter (분할 전략) 선택 - 요청사항 반영
+    # Scikit-learn에는 'best'와 'random' 두 가지가 있으므로 선택할 수 있게 표시합니다.
+    splitter_option = st.selectbox(
+        "분할 전략 (Splitter)",
+        ["best", "random"],
+        index=0, # 기본값: best
+        key="tree_splitter",
+        help="각 노드에서 분할을 선택하는 전략입니다. (best: 최적 분할, random: 무작위 분할)"
+    )
+    st.session_state.models["tree_splitter"] = splitter_option
+
+    st.caption(f"설정 요약: 깊이 {tree_depth}, 기준 {criterion_option}")
+    st.caption("🔧 **전처리**: Label Encoding(범주형), Imputation(수치형)")
 
         with col3:
             st.markdown("##### ⚖️ Hybrid 모델 (결합 모형)")
