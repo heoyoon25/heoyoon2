@@ -439,8 +439,8 @@ elif st.session_state.step == 3:
             st.caption("🔧 **전처리**: OHE(범주형), StandardScaler(수치형)")
 
         with col2:
-    st.markdown("##### 🌳 Tree 모델 (의사결정나무)")
-    
+            st.markdown("##### 🌳 Tree 모델 (의사결정나무)")
+            
     # 1. 테스트 데이터 비율 설정
     test_size_dt = st.slider(
         "Tree 테스트 데이터 비율", 
