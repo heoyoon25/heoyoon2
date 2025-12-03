@@ -385,4 +385,194 @@ elif st.session_state.step == 3:
                 # Stepwise 버튼
                 if st.button("Stepwise 변수 선택 (Auto)", help="속도를 위해 데이터 일부를 샘플링하여 변수를 선택합니다."):
                     with st.spinner("Stepwise(Forward) 진행 중... (데이터 양에 따라 시간이 걸릴 수 있습니다)"):
-                        try
+                        try:
+                            # 1. 속도 개선을 위한 샘플링
+                            if len(X) > 2000:
+                                X_sample = X.sample(n=2000, random_state=42)
+                                y_sample = y.loc[X_sample.index]
+                                st.caption("🚀 속도 향상을 위해 2,000개의 표본 데이터로 변수를 선택했습니다.")
+                            else:
+                                X_sample = X
+                                y_sample = y
+                            
+                            # 2. 모델 및 SFS 설정 (cv=3, n_jobs=-1)
+                            est = LogisticRegression(solver='lbfgs', max_iter=200) if is_classification else LinearRegression()
+                            
+                            sfs = SequentialFeatureSelector(
+                                est, 
+                                n_features_to_select='auto', 
+                                direction='forward',
+                                cv=3,  # 교차검증 횟수 단축
+                                n_jobs=-1 # 병렬 처리
+                            )
+                            
+                            sfs.fit(X_sample, y_sample)
+                            
+                            selected_mask = sfs.get_support()
+                            selected_features = X.columns[selected_mask].tolist()
+                            
+                            if not selected_features:
+                                st.warning("선택된 변수가 없습니다.")
+                            else:
+                                st.session_state.selected_logit_features = selected_features
+                                st.success(f"Stepwise 완료! {len(selected_features)}개 변수 선택됨.")
+                                
+                        except Exception as e:
+                            st.error(f"Stepwise 오류: {e}")
+
+                final_logit_feats = st.multiselect(
+                    "Logit 모델 사용 변수", 
+                    options=list(X.columns),
+                    default=st.session_state.selected_logit_features,
+                    key="logit_feats_select"
+                )
+                
+                test_size_logit = st.slider("Test 비율 (Logit)", 0.1, 0.4, 0.2)
+                if is_classification:
+                    C_logit = st.slider("규제 강도(C)", 0.01, 10.0, 1.0)
+
+        # -------------------------------------------------------------
+        # B. Tree / CART 설정
+        # -------------------------------------------------------------
+        with col_conf2:
+            st.markdown("#### 🌳 Decision Tree (CART)")
+            with st.expander("설정 열기", expanded=True):
+                # CART Selection 버튼
+                if st.button("Decision Tree(CART) 변수 선택 (Auto)", help="트리 중요도(Feature Importance) 기반 상위 변수 선택"):
+                    with st.spinner("CART 변수 중요도 분석 중..."):
+                        try:
+                            est_tree = DecisionTreeClassifier(random_state=42) if is_classification else DecisionTreeRegressor(random_state=42)
+                            est_tree.fit(X, y)
+                            
+                            selector = SelectFromModel(est_tree, prefit=True)
+                            selected_mask_tree = selector.get_support()
+                            
+                            st.session_state.selected_tree_features = X.columns[selected_mask_tree].tolist()
+                            st.success(f"CART 선택 완료! {sum(selected_mask_tree)}개 변수 선택됨.")
+                        except Exception as e:
+                            st.error(f"Tree 선택 오류: {e}")
+
+                final_tree_feats = st.multiselect(
+                    "Tree 모델 사용 변수", 
+                    options=list(X.columns),
+                    default=st.session_state.selected_tree_features,
+                    key="tree_feats_select"
+                )
+
+                test_size_tree = st.slider("Test 비율 (Tree)", 0.1, 0.4, 0.2)
+                tree_depth = st.slider("Max Depth", 2, 20, 6)
+
+        st.divider()
+        st.markdown("#### ⚖ Hybrid 가중치")
+        reg_weight = st.slider("Logit 가중치 (나머지는 Tree)", 0.0, 1.0, 0.5)
+
+        # -------------------------------------------------------------
+        # 학습 시작
+        # -------------------------------------------------------------
+        if st.button("🏁 모델 학습 시작 (최종 선택 변수 적용)", type="primary"):
+            try:
+                # 1. Logit 데이터셋 준비
+                X_logit = X[final_logit_feats]
+                X_train_l, X_test_l, y_train_l, y_test_l = train_test_split(
+                    X_logit, y, test_size=test_size_logit, random_state=42, stratify=y if is_classification else None
+                )
+                
+                # 2. Tree 데이터셋 준비
+                X_tree = X[final_tree_feats]
+                X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(
+                    X_tree, y, test_size=test_size_tree, random_state=42, stratify=y if is_classification else None
+                )
+                
+                # 3. 모델 정의 및 학습
+                if is_classification:
+                    model_l = LogisticRegression(C=C_logit, max_iter=1000)
+                    model_t = DecisionTreeClassifier(max_depth=tree_depth, random_state=42)
+                else:
+                    model_l = LinearRegression()
+                    model_t = DecisionTreeRegressor(max_depth=tree_depth, random_state=42)
+
+                model_l.fit(X_train_l, y_train_l)
+                model_t.fit(X_train_t, y_train_t)
+
+                st.session_state.models["logit_model"] = model_l
+                st.session_state.models["tree_model"] = model_t
+                st.session_state.models["hybrid_weight"] = reg_weight
+                
+                # 평가용 데이터 저장 (Logit split 기준)
+                st.session_state.data["eval_set"] = {
+                    "y_test": y_test_l,
+                    "X_test_logit": X_test_l,
+                    "X_test_tree": X_tree.loc[X_test_l.index] 
+                }
+
+                st.success("학습 완료! 성능 평가 페이지로 이동하세요.")
+            except Exception as e:
+                st.error(f"학습 중 오류: {e}")
+
+# ==============================================================================
+#  단계 4：성능 평가
+# ==============================================================================
+elif st.session_state.step == 4:
+    st.subheader("📈 모델 성능 심층 평가")
+
+    if "eval_set" not in st.session_state.data:
+        st.warning("⚠️ 모델 학습을 먼저 완료하세요.")
+    else:
+        # 데이터 로드
+        eval_data = st.session_state.data["eval_set"]
+        y_test = eval_data["y_test"]
+        X_test_l = eval_data["X_test_logit"]
+        X_test_t = eval_data["X_test_tree"]
+        
+        model_l = st.session_state.models["logit_model"]
+        model_t = st.session_state.models["tree_model"]
+        w = st.session_state.models["hybrid_weight"]
+        is_cls = st.session_state.get("is_classification", True)
+
+        if is_cls:
+            # 분류 평가
+            prob_l = model_l.predict_proba(X_test_l)[:, 1]
+            prob_t = model_t.predict_proba(X_test_t)[:, 1]
+            prob_h = w * prob_l + (1-w) * prob_t
+            pred_h = (prob_h >= 0.5).astype(int)
+            pred_l = model_l.predict(X_test_l)
+            pred_t = model_t.predict(X_test_t)
+
+            def get_metrics(y_true, y_pred, y_prob):
+                return {
+                    "Acc": accuracy_score(y_true, y_pred),
+                    "F1": f1_score(y_true, y_pred, zero_division=0),
+                    "AUC": auc(*roc_curve(y_true, y_prob)[:2])
+                }
+            
+            m1 = get_metrics(y_test, pred_l, prob_l)
+            m2 = get_metrics(y_test, pred_t, prob_t)
+            m3 = get_metrics(y_test, pred_h, prob_h)
+
+            st.table(pd.DataFrame([m1, m2, m3], index=["Logit", "Tree", "Hybrid"]))
+            
+            # ROC Curve
+            fpr_h, tpr_h, _ = roc_curve(y_test, prob_h)
+            fig = px.area(x=fpr_h, y=tpr_h, title="Hybrid ROC Curve", labels=dict(x="FPR", y="TPR"))
+            fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
+            st.plotly_chart(fig)
+
+            # Confusion Matrix
+            cm = confusion_matrix(y_test, pred_h)
+            fig_cm = px.imshow(cm, text_auto=True, title="Hybrid Confusion Matrix", color_continuous_scale='Blues')
+            st.plotly_chart(fig_cm)
+
+        else:
+            # 회귀 평가
+            pred_l = model_l.predict(X_test_l)
+            pred_t = model_t.predict(X_test_t)
+            pred_h = w * pred_l + (1-w) * pred_t
+            
+            mae = mean_absolute_error(y_test, pred_h)
+            r2 = r2_score(y_test, pred_h)
+            st.metric("Hybrid MAE", f"{mae:.4f}")
+            st.metric("Hybrid R2", f"{r2:.4f}")
+            
+            fig = px.scatter(x=y_test, y=pred_h, labels={'x':'Actual', 'y':'Predicted'}, title="Actual vs Predicted")
+            fig.add_shape(type='line', line=dict(dash='dash', color='red'), x0=y_test.min(), x1=y_test.max(), y0=y_test.min(), y1=y_test.max())
+            st.plotly_chart(fig)
