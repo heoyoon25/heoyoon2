@@ -18,128 +18,36 @@ from sklearn.metrics import (
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==============================================================================
-# 0. 전처리 함수 (전역으로 분리하여 재사용성 확보)
-# 데이터 누수 방지를 위해 X_train_raw 데이터로만 fit하고 X_test_raw에 transform을 적용합니다.
-# ==============================================================================
-def preprocess_data_for_model(X_train_raw, X_test_raw, num_cols, cat_cols, is_logit=True):
-    """
-    각 모델의 특성에 맞게 데이터를 전처리합니다. (Logit: OHE+Scaling, Tree: LE+Imputation)
-    """
-    # 훈련/테스트 데이터 복사 및 결측치 초기 대치 (범주형/수치형 모두 일단 'Unknown'으로)
-    X_train = X_train_raw.copy().fillna('Unknown') 
-    X_test = X_test_raw.copy().fillna('Unknown')
-    
-    # 1. 수치형 처리 (Imputation + Scaling)
-    if num_cols:
-        # 'Unknown'을 다시 np.nan으로 변경하여 Imputer가 처리하도록 함
-        X_train_num_imputed_df = X_train[num_cols].replace('Unknown', np.nan)
-        X_test_num_imputed_df = X_test[num_cols].replace('Unknown', np.nan)
-        
-        imputer = SimpleImputer(strategy='mean')
-        
-        # 훈련 데이터에 fit 후 transform
-        X_train_num_imputed = imputer.fit_transform(X_train_num_imputed_df)
-        X_test_num_imputed = imputer.transform(X_test_num_imputed_df)
-        
-        # Logit 모델일 경우 스케일링
-        if is_logit:
-            scaler = StandardScaler()
-            X_train_num_scaled = scaler.fit_transform(X_train_num_imputed)
-            X_test_num_scaled = scaler.transform(X_test_num_imputed)
-        else:
-            X_train_num_scaled = X_train_num_imputed # Tree 모델은 스케일링 불필요
-            X_test_num_scaled = X_test_num_imputed
-            
-        X_train_num = pd.DataFrame(X_train_num_scaled, columns=num_cols, index=X_train.index)
-        X_test_num = pd.DataFrame(X_test_num_scaled, columns=num_cols, index=X_test.index)
-    else:
-        X_train_num = pd.DataFrame(index=X_train.index)
-        X_test_num = pd.DataFrame(index=X_test.index)
-        
-    # 2. 범주형 처리 (Logit: OHE, Tree: Label Encoding)
-    if cat_cols:
-        if is_logit:
-            # Logit: One-Hot Encoding
-            X_train_cat = pd.get_dummies(X_train[cat_cols].astype(str), prefix=cat_cols)
-            X_test_cat = pd.get_dummies(X_test[cat_cols].astype(str), prefix=cat_cols)
-            
-            # 훈련/테스트셋 컬럼 일치 (OHE 필수)
-            train_cols = X_train_cat.columns
-            X_test_cat = X_test_cat.reindex(columns=train_cols, fill_value=0)
-            
-        else:
-            # Tree: Label Encoding (결측치는 'Unknown'으로 이미 처리됨)
-            X_train_cat = pd.DataFrame(index=X_train.index)
-            X_test_cat = pd.DataFrame(index=X_test.index)
-            for col in cat_cols:
-                le = LabelEncoder()
-                le.fit(X_train[col].astype(str)) # Tree 훈련 데이터에 fit
-                
-                # 테스트셋에 없는 레이블은 무시 (오류 방지)
-                test_labels = np.array(X_test[col].astype(str))
-                train_classes = set(le.classes_)
-                
-                # 훈련셋에 없는 값은 새로운 레이블 (-1) 부여
-                test_mapped = np.array([le.transform([x])[0] if x in train_classes else -1 
-                                        for x in test_labels])
-                X_train_cat[col] = le.transform(X_train[col].astype(str))
-                X_test_cat[col] = test_mapped
-    else:
-        X_train_cat = pd.DataFrame(index=X_train.index)
-        X_test_cat = pd.DataFrame(index=X_test.index)
-    
-    # 3. 최종 병합
-    X_train_processed = pd.concat([X_train_num, X_train_cat], axis=1)
-    X_test_processed = pd.concat([X_test_num, X_test_cat], axis=1)
-
-    # 최종 정리 (무한대/잔여 결측치 0으로 대치)
-    X_train_processed = X_train_processed.replace([np.inf, -np.inf], 0).fillna(0)
-    X_test_processed = X_test_processed.replace([np.inf, -np.inf], 0).fillna(0)
-    
-    return X_train_processed, X_test_processed
-
-
 # ----------------------
 # 1. 페이지 기본 설정
 # ----------------------
 st.set_page_config(
-    page_title="하이브리드 모델 구축 및 비교",
+    page_title="하이브리드모형 동적 프레임워크（의사결정나무+회귀분석）",
     page_icon="📊",
     layout="wide"
 )
 
-# 전역 상태 관리
+# 전역 상태 관리（각 단계 데이터/모델 저장，새로고침 시 손실 방지）
 if "step" not in st.session_state:
-    st.session_state.step = 0
+    st.session_state.step = 0  # 0:데이터업로드 1:데이터시각화 2:데이터전처리 3:모델학습 4:예측 5:평가 (초기설정 제거됨)
 if "data" not in st.session_state:
-    st.session_state.data = {"merged": None}
+    st.session_state.data = {"merged": None}  # 단일 파일만 저장
 if "preprocess" not in st.session_state:
-    # 전처리 기준 정보 (fit된 객체가 아닌, 컬럼 목록을 저장)
-    st.session_state.preprocess = {
-        "num_cols": [], 
-        "cat_cols": [], 
-        "target_col": None,
-        "target_encoder": None
-    }
+    st.session_state.preprocess = {"imputer": None, "scaler": None, "encoders": None, "feature_cols": None, "target_col": None}
 if "models" not in st.session_state:
-    st.session_state.models = {
-        "regression": None,
-        "decision_tree": None,
-        "test_size_reg": 0.2, 
-        "test_size_dt": 0.2, 
-        "mixed_weights": {"regression": 0.5, "decision_tree": 0.5}
-    }
+    # 模型：regression（회귀분석）、decision_tree（의사결정나무）
+    st.session_state.models = {"regression": None, "decision_tree": None, "mixed_weights": {"regression": 0.3, "decision_tree": 0.7}}
 if "task" not in st.session_state:
-    st.session_state.task = "logit"
+    st.session_state.task = "logit"  # 기본값 logit（분류），의사결정나무（회귀）로 전환 가능
     
 
 # ----------------------
-# 2. 사이드바：단계 네비게이션
+# 2. 사이드바：단계导航 + 핵심 설정
 # ----------------------
 st.sidebar.title("📌 하이브리드모형 작업 흐름")
 st.sidebar.divider()
 
+# 단계导航 버튼
 steps = ["데이터 업로드", "데이터 시각화", "데이터 전처리", "모델 학습", "성능 평가"]
 for i, step_name in enumerate(steps):
     if st.sidebar.button(step_name, key=f"btn_{i}"):
@@ -149,7 +57,7 @@ for i, step_name in enumerate(steps):
 # ----------------------
 # 3. 메인 페이지：단계별 내용 표시
 # ----------------------
-st.title("📊 하이브리드 모델 구축 및 비교")
+st.title("📊 하이브리드모형 동적 배포 프레임워크")
 st.divider()
 
 # ==============================================================================
@@ -157,24 +65,27 @@ st.divider()
 # ==============================================================================
 
 # ----------------------
-#  단계 0：데이터 업로드
+#  단계 0：데이터 업로드 (기존 단계 1에서 이동)
 # ----------------------
 if st.session_state.step == 0:
     st.subheader("📤 데이터 업로드")
     
     tab1, tab2 = st.tabs(["📂 내 파일 업로드", "💾 서버 기본 데이터 사용"])
     
+    # 인코딩 처리를 위한 내부 함수
     def load_csv_safe(file_buffer):
+        # 시도할 인코딩 목록 (순서대로 시도)
         encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig', 'latin1']
+        
         for enc in encodings:
             try:
-                file_buffer.seek(0)
+                file_buffer.seek(0) # 파일 포인터 초기화
                 df = pd.read_csv(file_buffer, encoding=enc)
-                return df, enc
+                return df, enc # 성공하면 데이터와 인코딩 반환
             except UnicodeDecodeError:
-                continue
+                continue # 실패하면 다음 인코딩 시도
             except Exception as e:
-                return None, str(e)
+                return None, str(e) # 기타 에러
         return None, "모든 인코딩 시도 실패"
 
     with tab1:
@@ -184,6 +95,7 @@ if st.session_state.step == 0:
         if uploaded_file:
             try:
                 df = None
+                # 확장자별 로드
                 if uploaded_file.name.endswith('.csv'):
                     df, enc_used = load_csv_safe(uploaded_file)
                     if df is None:
@@ -197,6 +109,7 @@ if st.session_state.step == 0:
                     df = pd.read_excel(uploaded_file)
                 
                 if df is not None:
+                    # 인덱스 초기화 (전처리 에러 방지용 필수)
                     df = df.reset_index(drop=True)
                     st.session_state.data["merged"] = df
                     st.success(f"✅ 파일 업로드 성공! ({len(df):,} 행)")
@@ -205,26 +118,25 @@ if st.session_state.step == 0:
                 st.error(f"❌ 파일 처리 중 오류 발생: {e}")
     
     with tab2:
-        DEFAULT_FILE_PATH = "accepted_data.csv"
+        DEFAULT_FILE_PATH = "Accepted_data (1).csv" 
         st.info(f"💡 **기본 데이터 설명**: 대출 관련 통합 데이터 (`{DEFAULT_FILE_PATH}`)")
         
         if st.button("기본 데이터 불러오기", type="primary"):
             if os.path.exists(DEFAULT_FILE_PATH):
-                try:
-                    with open(DEFAULT_FILE_PATH, 'rb') as f:
-                        df_default, enc_used = load_csv_safe(f)
-                    
-                    if df_default is not None:
-                        st.session_state.data["merged"] = df_default.reset_index(drop=True)
-                        st.success(f"✅ 기본 데이터 로드 성공! ({len(df_default):,} 행, 인코딩: {enc_used})")
-                        st.rerun()
-                    else:
-                        st.error("❌ 기본 파일을 읽을 수 없습니다 (인코딩 오류).")
-                except Exception as e:
-                    st.error(f"❌ 기본 파일 로드 중 오류 발생: {e}")
+                # 기본 파일도 안전하게 로드 시도
+                with open(DEFAULT_FILE_PATH, 'rb') as f:
+                    df_default, enc_used = load_csv_safe(f)
+                
+                if df_default is not None:
+                    st.session_state.data["merged"] = df_default.reset_index(drop=True)
+                    st.success(f"✅ 기본 데이터 로드 성공! ({len(df_default):,} 행, 인코딩: {enc_used})")
+                    st.rerun()
+                else:
+                    st.error("❌ 기본 파일을 읽을 수 없습니다 (인코딩 오류).")
             else:
                 st.error(f"⚠️ 파일을 찾을 수 없습니다: {DEFAULT_FILE_PATH}")
 
+    # 데이터 미리보기
     if st.session_state.data.get("merged") is not None:
         df_merged = st.session_state.data["merged"]
         st.divider()
@@ -232,7 +144,7 @@ if st.session_state.step == 0:
         st.dataframe(df_merged.head(5), width='stretch')
 
 # ----------------------
-#  단계 1：데이터 시각화
+#  단계 1：데이터 시각화 (기존 단계 2에서 이동)
 # ----------------------
 elif st.session_state.step == 1:
     st.subheader("📊 데이터 시각화")
@@ -242,6 +154,7 @@ elif st.session_state.step == 1:
     else:
         df = st.session_state.data["merged"]
         
+        # --- 변수 선택 (Variable Selection) ---
         st.markdown("### 1️⃣ 시각화할 변수 선택")
         all_cols = df.columns.tolist()
         default_selection = all_cols[:10] if len(all_cols) > 10 else all_cols
@@ -258,6 +171,7 @@ elif st.session_state.step == 1:
             df_vis = df[selected_cols]
             st.divider()
             
+            # --- 그래프 설정 ---
             st.markdown("### 2️⃣ 그래프 설정")
             cat_cols = df_vis.select_dtypes(include=["object", "category"]).columns.tolist()
             num_cols = df_vis.select_dtypes(include=["int64", "float64"]).columns.tolist()
@@ -275,6 +189,7 @@ elif st.session_state.step == 1:
             
             st.divider()
             
+            # 시각화 출력
             if y_var and y_var != "없음":
                 try:
                     if graph_type == "히스토그램":
@@ -301,7 +216,7 @@ elif st.session_state.step == 1:
                 st.info("Y축 변수를 선택하면 그래프가 표시됩니다.")
 
 # ----------------------
-#  단계 2：데이터 전처리 (변수 분류 및 Y-타겟 처리만 수행)
+#  단계 2：데이터 전처리 & 변수 선택
 # ----------------------
 elif st.session_state.step == 2:
     st.subheader("🧹 데이터 전처리 & 변수 선택")
@@ -309,385 +224,474 @@ elif st.session_state.step == 2:
     if st.session_state.data["merged"] is None:
         st.warning("⚠️ 먼저 '데이터 업로드' 단계를 완료하세요.")
     else:
+        # 원본 데이터 로드
         df_origin = st.session_state.data["merged"].copy()
         all_cols = df_origin.columns.tolist()
 
-        st.markdown("### 1️⃣ 분석 변수 설정")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            target_col = st.selectbox(
-                "🎯 타겟 변수 (Y) 선택", 
-                options=all_cols,
-                help="예측하고자 하는 목표 변수입니다."
-            )
+        # ---------------------------------------------------------
+        # 1️⃣ 타겟 변수(Y) 먼저 선택 (기존 Loan_status 우선 로직 유지)
+        # ---------------------------------------------------------
+        st.markdown("### 1️⃣ 타겟 변수 설정")
+
+        if "Loan_status" in all_cols:
+            default_index = all_cols.index("Loan_status")
+        else:
+            default_index = 0
             
-        feature_candidates = [c for c in all_cols if c != target_col]
-        
-        with col2:
-            default_feats = feature_candidates[:10] if len(feature_candidates) > 10 else feature_candidates
-            selected_features = st.multiselect(
-                "📋 입력 변수 (X) 선택",
-                options=feature_candidates,
-                default=default_feats,
-                help="타겟 변수를 예측하기 위해 사용할 데이터입니다."
-            )
-        
+        target_col = st.selectbox(
+            "🎯 타겟 변수 (Y) 선택", 
+            options=all_cols,
+            index=default_index,
+            help="예측하고자 하는 목표 변수입니다."
+        )
+
+        # 타겟 이름을 미리 저장 (다음 단계에서 사용)
+        st.session_state.preprocess["target_col"] = target_col
+
         st.divider()
 
-        if not selected_features:
-            st.error("⚠️ 분석할 변수를 선택해주세요.")
-        else:
-            
-            tabs = st.tabs(["⚡ 전처리 실행"])
-            tab1 = tabs[0]
-            
-            with tab1:
-                st.write(f"**Y(타겟) 결측치 제거** 및 **X 변수 목록 분류**를 수행합니다.")
-                st.caption("ℹ️ X 변수의 실제 스케일링/결측치 처리는 **데이터 누수 방지**를 위해 **'모델 학습' 단계**에서 진행됩니다.")
-                
-                if st.button("🚀 데이터 정제 및 변수 분류 시작", type="primary"):
-                    with st.spinner("데이터 정제 및 변수 분류 중..."):
-                        try:
-                            if target_col in selected_features:
-                                selected_features.remove(target_col)
-                                
-                            # 1. 타겟(Y) 결측치 처리
-                            clean_df = df_origin.dropna(subset=[target_col]).reset_index(drop=True)
-                            dropped_count = len(df_origin) - len(clean_df)
-                            if dropped_count > 0:
-                                st.warning(f"⚠️ 타겟 변수({target_col})가 비어있는 {dropped_count}개 행을 제거했습니다.")
-                            
-                            X_raw = clean_df[selected_features].copy()
-                            y = clean_df[target_col].copy()
-                            
-                            # 2. 타겟 변수(Y) 인코딩 처리
-                            le_target = None
-                            if y.dtype == 'object' or y.dtype.name == 'category':
-                                le_target = LabelEncoder()
-                                y = pd.Series(le_target.fit_transform(y), index=y.index)
-                                st.info(f"ℹ️ 타겟 변수 '{target_col}'가 문자열 형식이어서 숫자로 변환(Label Encoding)했습니다.")
-                                mapping_info = {i: label for i, label in enumerate(le_target.classes_)}
-                                st.caption(f"└ 변환 정보: {mapping_info}")
+        # ---------------------------------------------------------
+        # 2️⃣ 전처리 실행 (X는 아직 전체 후보, 나중에 선택)
+        # ---------------------------------------------------------
+        st.markdown("### 2️⃣ 데이터 전처리 실행")
 
-                            # 3. 입력 변수(X) 분류 (실제 변환은 단계 3에서)
-                            num_cols = X_raw.select_dtypes(include=['int64', 'float64']).columns.tolist()
-                            cat_cols = X_raw.select_dtypes(include=['object', 'category']).columns.tolist()
-                            
-                            # 4. 전역 상태(Session State)에 저장
-                            st.session_state.preprocess.update({
-                                "target_col": target_col,
-                                "target_encoder": le_target,
-                                "num_cols": num_cols,
-                                "cat_cols": cat_cols,
-                            })
-                            st.session_state.data["X_raw"] = X_raw
-                            st.session_state.data["y_processed"] = y
-                            
-                            st.success(f"✅ 변수 분류 완료! (수치형: {len(num_cols)}개, 범주형: {len(cat_cols)}개, 데이터: {len(X_raw)}행)")
-                            st.dataframe(X_raw.head(), width='stretch')
-                            
+        if st.button("🚀 전처리 및 정제 시작", type="primary"):
+            with st.spinner("데이터 정제 중..."):
+                try:
+                    # 2-1) 타겟(Y) 결측치 제거
+                    clean_df = df_origin.dropna(subset=[target_col]).reset_index(drop=True)
+                    dropped_count = len(df_origin) - len(clean_df)
+                    if dropped_count > 0:
+                        st.warning(f"⚠️ 타겟 변수({target_col})가 비어있는 {dropped_count}개 행을 제거했습니다.")
+
+                    # 2-2) X 후보: 타겟을 제외한 모든 컬럼
+                    X_raw = clean_df.drop(columns=[target_col])
+                    y = clean_df[target_col].copy()
+
+                    # 2-3) X에서 결측치 비율 95% 이상인 컬럼 제거
+                    missing_ratio = X_raw.isna().mean()
+                    high_missing_cols = missing_ratio[missing_ratio >= 0.95].index.tolist()
+                    if high_missing_cols:
+                        st.warning(
+                            f"⚠️ 결측치 비율이 95% 이상인 변수 {len(high_missing_cols)}개를 제거했습니다: "
+                            f"{', '.join(high_missing_cols)}"
+                        )
+                        X_raw = X_raw.drop(columns=high_missing_cols)
+
+                    # -----------------------------------------------------
+                    # 2-4) 타겟(Y) 인코딩 (문자형일 경우)
+                    # -----------------------------------------------------
+                    le_target = None
+                    if y.dtype == 'object' or y.dtype.name == 'category':
+                        try:
+                            le_target = LabelEncoder()
+                            y = pd.Series(le_target.fit_transform(y), index=y.index)
+                            st.info(f"ℹ️ 타겟 변수 '{target_col}'가 문자열 형식이어서 숫자로 변환(Label Encoding)했습니다.")
+                            mapping_info = {i: label for i, label in enumerate(le_target.classes_)}
+                            st.caption(f"└ 변환 정보: {mapping_info}")
                         except Exception as e:
-                            st.error(f"❌ 전처리 중 오류 발생: {str(e)}")
-                else:
-                    st.info("👈 위 버튼을 눌러 전처리를 시작하세요.")
+                            st.warning(f"타겟 변수 인코딩 중 이슈 발생: {e}")
+
+                    # -----------------------------------------------------
+                    # 2-5) X 전처리 (결측치, 이상치, 스케일링, 인코딩)
+                    # -----------------------------------------------------
+                    X = X_raw.copy()
+                    
+                    num_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
+                    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+                    
+                    # 값이 하나도 없는 수치형 컬럼 제거
+                    valid_num_cols = [c for c in num_cols if X[c].notna().sum() > 0]
+                    num_cols = valid_num_cols 
+
+                    imputer = SimpleImputer(strategy='mean')
+                    scaler = StandardScaler()
+                    encoders = {}
+                    outlier_bounds = {}
+
+                    # 수치형 처리: 평균 대치 → IQR 윈저라이징 → 스케일링
+                    if num_cols:
+                        X_imputed = imputer.fit_transform(X[num_cols])
+                        X_num_df = pd.DataFrame(X_imputed, columns=num_cols, index=X.index)
+
+                        for col in num_cols:
+                            q1 = X_num_df[col].quantile(0.25)
+                            q3 = X_num_df[col].quantile(0.75)
+                            iqr = q3 - q1
+                            if iqr == 0:
+                                continue
+                            lower = q1 - 1.5 * iqr
+                            upper = q3 + 1.5 * iqr
+                            outlier_bounds[col] = {"lower": lower, "upper": upper}
+                            X_num_df[col] = X_num_df[col].clip(lower=lower, upper=upper)
+
+                        X_scaled = scaler.fit_transform(X_num_df)
+                        X[num_cols] = pd.DataFrame(X_scaled, columns=num_cols, index=X.index)
+                    
+                    # 범주형 처리: 결측치 'Unknown' → LabelEncoding
+                    for col in cat_cols:
+                        X[col] = X[col].fillna("Unknown").astype(str)
+                        le = LabelEncoder()
+                        trans = le.fit_transform(X[col])
+                        X[col] = pd.Series(trans, index=X.index)
+                        encoders[col] = le
+                    
+                    # 최종 컬럼 목록 & 잔여 결측치 처리
+                    final_features = num_cols + cat_cols
+                    X = X[final_features]
+                    X = X.replace([np.inf, -np.inf], np.nan)
+                    if X.isna().sum().sum() > 0:
+                        st.info("ℹ️ 처리되지 않은 잔여 결측치를 0으로 대치합니다.")
+                        X = X.fillna(0)
+
+                    # 후보 X, y 저장 (아직 최종 X 선택 전)
+                    st.session_state.data["X_candidates"] = X
+                    st.session_state.data["y_processed"] = y
+
+                    st.session_state.preprocess.update({
+                        "feature_candidates": final_features,
+                        "imputer": imputer if num_cols else None,
+                        "scaler": scaler if num_cols else None,
+                        "encoders": encoders,
+                        "target_encoder": le_target,
+                        "outlier_bounds": outlier_bounds
+                    })
+
+                    # SMOTE 플래그 기본값 (분류에서만 사용)
+                    if "use_smote" not in st.session_state:
+                        st.session_state.use_smote = False
+
+                    st.success(f"✅ 전처리 완료! (후보 변수: {len(final_features)}개, 데이터: {len(X)}행)")
+                    st.dataframe(X.head(), use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"❌ 전처리 중 오류 발생: {str(e)}")
+
+        st.divider()
+
+        # ---------------------------------------------------------
+        # 3️⃣ 전처리된 데이터에서 최종 입력 변수(X) 선택
+        # ---------------------------------------------------------
+        if "X_candidates" in st.session_state.data:
+            st.markdown("### 3️⃣ 최종 입력 변수(X) 선택")
+
+            X_candidates = st.session_state.data["X_candidates"]
+            feature_candidates = st.session_state.preprocess.get(
+                "feature_candidates",
+                X_candidates.columns.tolist()
+            )
+
+            # 이전에 선택한 feature_cols 있으면 기본값으로 활용
+            prev_selected = st.session_state.preprocess.get(
+                "feature_cols",
+                feature_candidates[:10] if len(feature_candidates) > 10 else feature_candidates
+            )
+
+            selected_features = st.multiselect(
+                "📋 분석에 사용할 최종 입력 변수 (X)",
+                options=feature_candidates,
+                default=prev_selected,
+                help="전처리된 변수들 중에서 실제 모델에 사용할 입력 변수만 선택합니다."
+            )
+
+            if not selected_features:
+                st.error("⚠️ 최소 1개 이상의 입력 변수를 선택해주세요.")
+            else:
+                X_final = X_candidates[selected_features].copy()
+                st.session_state.data["X_processed"] = X_final
+                st.session_state.preprocess["feature_cols"] = selected_features
+
+                st.success(f"✅ 최종 변수 선택 완료! (X: {len(selected_features)}개)")
+                st.dataframe(X_final.head(), use_container_width=True)
+
+
+
 
 # ==============================================================================
-#  단계 3：모델 학습 (데이터 분할 및 전처리 동시 수행)
+#  단계 3：🚀 모델 학습 (Logit / Tree / Hybrid)
 # ==============================================================================
 elif st.session_state.step == 3:
     st.subheader("🚀 모델 학습 설정")
-    
-    if "X_raw" not in st.session_state.data:
-        st.warning("⚠️ 먼저 [데이터 전처리] 단계를 완료하세요.")
+
+    if "X_processed" not in st.session_state.data:
+        st.warning("⚠ 먼저 전처리 단계를 완료하세요.")
     else:
-        # X_raw와 y_processed 로드
-        X_raw = st.session_state.data["X_raw"]
+        X = st.session_state.data["X_processed"]
         y = st.session_state.data["y_processed"]
-        num_cols = st.session_state.preprocess["num_cols"]
-        cat_cols = st.session_state.preprocess["cat_cols"]
-        
+
         # -------------------------------------------------------------
-        # 1. 분석 유형 선택
+        # 1️⃣ 분석 유형 선택 (분류 / 회귀)
         # -------------------------------------------------------------
-        st.markdown("### 1️⃣ 분석 유형 선택")
         task_option = st.radio(
-            "데이터의 타겟(Y) 특성에 맞는 유형을 선택하세요:",
+            "분석 유형을 선택하세요:",
             ["분류 (Classification)", "회귀 (Regression)"],
-            horizontal=True,
-            key="task_radio"
+            horizontal=True
         )
-        st.session_state.task = "logit" if "분류" in task_option else "tree"
-        
+        is_classification = "분류" in task_option
+        st.session_state["is_classification"] = is_classification
+
         st.divider()
 
         # -------------------------------------------------------------
-        # 2. 모델 설정 및 데이터 분할 (개별 분할 설정)
+        # 2️⃣ 모델별 하이퍼파라미터 설정
         # -------------------------------------------------------------
-        st.markdown("### 2️⃣ 모델 설정 및 데이터 분할")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("##### 🔹 Logit 모델 (회귀/로지스틱)")
-            test_size_reg = st.slider(
-                "Logit 테스트 데이터 비율", 
-                0.1, 0.4, st.session_state.models["test_size_reg"], 0.05, 
-                key="test_size_reg",
-                help="Logit 모델 학습 시 사용할 테스트 데이터의 비율입니다."
+        st.markdown("### 2️⃣ 모델별 하이퍼파라미터 설정")
+
+        # 🔹 Logit / Linear Model 설정
+        with st.expander("🔹 Logit (분류) / Linear (회귀) 모델 설정", expanded=True):
+            test_size_logit = st.slider(
+                "📌 Logit / Linear 모델용 Test 비율",
+                0.1, 0.4, 0.2, key="logit_test"
             )
-            st.session_state.models["test_size_reg"] = test_size_reg
-            st.caption("🔧 **전처리**: OHE(범주형), StandardScaler(수치형)")
 
-        with col2:
-            st.markdown("##### 🌳 Tree 모델 (의사결정나무)")
-            
-    # 1. 테스트 데이터 비율 설정
-    test_size_dt = st.slider(
-        "Tree 테스트 데이터 비율", 
-        0.1, 0.4, st.session_state.models.get("test_size_dt", 0.25), 0.05, 
-        key="test_size_dt",
-        help="Tree 모델 학습 시 사용할 테스트 데이터의 비율입니다."
-    )
-    st.session_state.models["test_size_dt"] = test_size_dt
-    
-    # 2. 최대 깊이 설정
-    tree_depth = st.slider("최대 깊이 (Max Depth)", 1, 20, 5, key="tree_depth")
-    st.session_state.models["tree_depth"] = tree_depth # 세션 상태에 저장 (필요시)
+            if is_classification:
+                # 👉 로지스틱 회귀 세부 설정
+                C_logit = st.slider(
+                    "🔧 Logit 규제 강도(C)",
+                    0.01, 10.0, 1.0, 0.01
+                )
+                max_iter_logit = st.slider(
+                    "🔧 Logit 최대 반복 횟수 (max_iter)",
+                    100, 5000, 1000, 100
+                )
+                st.caption("※ solver는 'lbfgs', penalty=L2 로 고정합니다.")
+            else:
+                st.caption("회귀 선택 시 LinearRegression 기본 값을 사용합니다.")
 
-    # 3. Criterion (분할 기준) 선택 - 요청사항 반영 (entropy 포함)
-    criterion_option = st.selectbox(
-        "분할 기준 (Criterion)",
-        ["gini", "entropy", "log_loss"],
-        index=0, # 기본값: gini
-        key="tree_criterion",
-        help="지니 계수(gini) 또는 엔트로피(entropy) 등을 기준으로 분할 품질을 측정합니다."
-    )
-    st.session_state.models["tree_criterion"] = criterion_option
+        # 🌳 Tree Model 설정
+        with st.expander("🌳 Tree 모델 설정 (Decision Tree)", expanded=True):
+            test_size_tree = st.slider(
+                "📌 Tree 모델용 Test 비율",
+                0.1, 0.4, 0.2, key="tree_test"
+            )
+            tree_depth = st.slider(
+                "🔧 트리 깊이 (max_depth)",
+                2, 20, 6
+            )
+            # ⛔ min_samples_split, min_samples_leaf 제거
 
-    # 4. Splitter (분할 전략) 선택 - 요청사항 반영
-    # Scikit-learn에는 'best'와 'random' 두 가지가 있으므로 선택할 수 있게 표시합니다.
-    splitter_option = st.selectbox(
-        "분할 전략 (Splitter)",
-        ["best", "random"],
-        index=0, # 기본값: best
-        key="tree_splitter",
-        help="각 노드에서 분할을 선택하는 전략입니다. (best: 최적 분할, random: 무작위 분할)"
-    )
-    st.session_state.models["tree_splitter"] = splitter_option
-
-    st.caption(f"설정 요약: 깊이 {tree_depth}, 기준 {criterion_option}")
-    st.caption("🔧 **전처리**: Label Encoding(범주형), Imputation(수치형)")
-    
-    with col3:
-        st.markdown("##### ⚖️ Hybrid 모델 (결합 모형)")
-        st.caption("Logit + Tree 예측 결과 가중치")
-        reg_weight = st.slider("Logit 가중치", 0.0, 1.0, st.session_state.models["mixed_weights"]["regression"], 0.1, key="reg_weight")
-        st.session_state.models["mixed_weights"]["regression"] = reg_weight
-        st.session_state.models["mixed_weights"]["decision_tree"] = 1.0 - reg_weight
-        st.caption(f"비율: Logit {int(reg_weight*100)}% : Tree {int((1-reg_weight)*100)}%")
+        # ⚖️ Hybrid Model 설정
+        with st.expander("⚖ Hybrid 모델 설정", expanded=True):
+            test_size_hybrid = st.slider(
+                "📌 Hybrid 모델용 Test 비율",
+                0.1, 0.4, 0.2, key="hybrid_test"
+            )
+            reg_weight = st.slider(
+                "Logit 가중치",
+                0.0, 1.0, 0.5, 0.1,
+                key="hybrid_weight"
+            )
+            st.caption(f"👉 최종 예측 = Logit {reg_weight*100:.0f}% + Tree {(1-reg_weight)*100:.0f}%")
 
         st.divider()
-        
+
         # -------------------------------------------------------------
-        # 3. 학습 시작 버튼
+        # 3️⃣ 모델 학습 시작
         # -------------------------------------------------------------
-        if st.button("🏁 모델 학습 시작", type="primary"):
-            with st.spinner("3가지 모델을 모두 학습 중입니다..."):
-                try:
-                    # 1. Logit 모델용 데이터 분할
-                    stratify_reg = y if st.session_state.task == "logit" and y.nunique() > 1 else None
-                    X_train_raw_reg, X_test_raw_reg, y_train_reg, y_test_reg = train_test_split(
-                        X_raw, y, test_size=test_size_reg, random_state=42, stratify=stratify_reg
+        if st.button("🏁 모델 학습 시작"):
+            try:
+                stratify_opt = y if is_classification else None
+
+                # ------------------------------
+                # 데이터 분리
+                # ------------------------------
+                X_train_logit, X_test_logit, y_train_logit, y_test_logit = train_test_split(
+                    X, y, test_size=test_size_logit, random_state=42,
+                    stratify=stratify_opt if is_classification else None
+                )
+                X_train_tree, X_test_tree, y_train_tree, y_test_tree = train_test_split(
+                    X, y, test_size=test_size_tree, random_state=42,
+                    stratify=stratify_opt if is_classification else None
+                )
+                X_train_hybrid, X_test_hybrid, y_train_hybrid, y_test_hybrid = train_test_split(
+                    X, y, test_size=test_size_hybrid, random_state=42,
+                    stratify=stratify_opt if is_classification else None
+                )
+
+                # -------------------------------------------------------------
+                # 4️⃣ 모델 생성 (Logit / Tree)
+                # -------------------------------------------------------------
+                if is_classification:
+                    logit_model = LogisticRegression(
+                        max_iter=max_iter_logit,
+                        C=C_logit,
+                        solver="lbfgs"
                     )
-                    
-                    # 2. Logit 모델용 데이터 전처리 (OHE + Scaling)
-                    # 전역 함수 사용
-                    X_train_reg, X_test_reg = preprocess_data_for_model(
-                        X_train_raw_reg, X_test_raw_reg, num_cols, cat_cols, is_logit=True
+                    tree_model = DecisionTreeClassifier(
+                        max_depth=tree_depth,
+                        random_state=42
                     )
-                    
-                    # 3. Logit 모델 학습
-                    if st.session_state.task == "logit":
-                        reg_model = LogisticRegression(max_iter=5000, random_state=42, solver='liblinear') # Max_iter 증가, solver 명시
-                    else:
-                        reg_model = LinearRegression()
-                    reg_model.fit(X_train_reg, y_train_reg)
-
-
-                    # 4. Tree 모델용 데이터 분할
-                    stratify_dt = y if st.session_state.task == "logit" and y.nunique() > 1 else None
-                    X_train_raw_dt, X_test_raw_dt, y_train_dt, y_test_dt = train_test_split(
-                        X_raw, y, test_size=test_size_dt, random_state=42, stratify=stratify_dt
+                else:
+                    logit_model = LinearRegression()
+                    tree_model = DecisionTreeRegressor(
+                        max_depth=tree_depth,
+                        random_state=42
                     )
 
-                    # 5. Tree 모델용 데이터 전처리 (Label Encoding + Imputation)
-                    # 전역 함수 사용
-                    X_train_dt, X_test_dt = preprocess_data_for_model(
-                        X_train_raw_dt, X_test_raw_dt, num_cols, cat_cols, is_logit=False
-                    )
+                # -------------------------------------------------------------
+                # 5️⃣ 모델 학습 실행
+                # -------------------------------------------------------------
+                logit_model.fit(X_train_logit, y_train_logit)
+                tree_model.fit(X_train_tree, y_train_tree)
 
-                    # 6. Tree 모델 학습
-                    if st.session_state.task == "logit":
-                        dt_model = DecisionTreeClassifier(max_depth=tree_depth, random_state=42)
-                    else:
-                        dt_model = DecisionTreeRegressor(max_depth=tree_depth, random_state=42)
-                    dt_model.fit(X_train_dt, y_train_dt)
-                    
-                    # 7. 결과 저장
-                    st.session_state.models["regression"] = reg_model
-                    st.session_state.models["decision_tree"] = dt_model
-                    
-                    # 전처리된 테스트셋 저장 (평가에 사용)
-                    st.session_state.data.update({
-                        "X_test_reg": X_test_reg, "y_test_reg": y_test_reg,
-                        "X_test_dt": X_test_dt, "y_test_dt": y_test_dt,
-                        "X_test_raw_reg": X_test_raw_reg, # Hybrid 평가를 위한 Logit 테스트셋 원본
-                        "X_train_raw_dt": X_train_raw_dt # Hybrid 평가를 위한 Tree 훈련셋 원본 (새로 추가)
-                    })
+                # -------------------------------------------------------------
+                # 6️⃣ Hybrid 저장
+                # -------------------------------------------------------------
+                st.session_state.models.update({
+                    "logit_model": logit_model,
+                    "tree_model": tree_model,
+                    "hybrid_weight": reg_weight
+                })
 
-                    st.success("✅ 모든 모델의 학습이 완료되었습니다!")
-                    st.info(f"👉 **'성능 평가' 단계로 이동하여 3개 모델의 성능을 비교하세요.**"
-                             f"\n\n**Logit 모델**: {test_size_reg*100:.0f}% 테스트셋 사용 (OHE/Scaling 적용)"
-                             f"\n**Tree 모델**: {test_size_dt*100:.0f}% 테스트셋 사용 (Label Encoding 적용)")
-                    
-                    st.button("👉 성능 평가 단계로 이동", on_click=lambda: st.session_state.update(step=4))
+                st.session_state.data.update({
+                    "X_test_logit": X_test_logit, "y_test_logit": y_test_logit,
+                    "X_test_tree": X_test_tree, "y_test_tree": y_test_tree,
+                    "X_test_hybrid": X_test_hybrid, "y_test_hybrid": y_test_hybrid
+                })
 
-                except Exception as e:
-                    st.error(f"학습 중 오류 발생: {e}")
-                            
+                st.success("🎯 모든 모델 학습 완료! 성능 평가 단계로 이동하세요.")
+
+            except Exception as e:
+                st.error(f"❌ 오류 발생: {e}")
+
+
 # ==============================================================================
-#  단계 4：성능 평가 
-# (중복 함수 제거 및 전역 함수를 사용하도록 로직 개선)
+#  단계 4：성능 평가 (확장된 지표 및 혼동행렬 추가)
 # ==============================================================================
 elif st.session_state.step == 4:
     st.subheader("📈 모델 성능 심층 평가")
-    
-    if st.session_state.models["regression"] is None:
+
+    # 1. 모델이 학습되었는지 확인
+    if "logit_model" not in st.session_state.models or "tree_model" not in st.session_state.models:
         st.warning("⚠️ 먼저 [모델 학습] 단계를 완료하세요")
     else:
-        # 데이터 및 모델 로드
-        reg_model = st.session_state.models["regression"]
-        dt_model = st.session_state.models["decision_tree"]
-        w = st.session_state.models["mixed_weights"]
-        num_cols = st.session_state.preprocess["num_cols"]
-        cat_cols = st.session_state.preprocess["cat_cols"]
-        
-        X_test_reg = st.session_state.data["X_test_reg"]
-        y_test_reg = st.session_state.data["y_test_reg"]
-        X_test_dt = st.session_state.data["X_test_dt"]
-        y_test_dt = st.session_state.data["y_test_dt"]
-        X_test_raw_reg = st.session_state.data["X_test_raw_reg"]
-        # Tree 훈련셋 원본 데이터 로드 (Logit 테스트셋을 전처리할 때의 기준)
-        X_train_raw_dt = st.session_state.data["X_train_raw_dt"] 
+        # 🔹 분류 / 회귀 플래그 (step 3에서 저장한 값 사용)
+        is_classification = st.session_state.get("is_classification", True)
 
-        st.info(f"ℹ️ Hybrid 가중치: Logit {w['regression']*100:.0f}% + Tree {w['decision_tree']*100:.0f}%"
-                f" (평가는 Logit 모델의 테스트셋 크기({len(X_test_reg)}행)를 기준으로 진행됩니다.)")
-
-        # ----------------------------------------------------------------------
-        # A. Tree 모델의 Logit 테스트셋 예측값을 얻기 위한 재전처리 
-        # (중복 함수 제거: get_tree_preds_on_logit_test 대신 전역 함수 preprocess_data_for_model 사용)
-        # ----------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # ✅ 2. 데이터 및 모델 로드
+        # ------------------------------------------------------------------
+        X_test = st.session_state.data["X_test_hybrid"]
+        y_test = st.session_state.data["y_test_hybrid"]
         
-        # Logit 테스트셋(raw)을 Tree 모델의 훈련셋 기준으로 전처리하여 Tree 모델이 예측할 수 있게 준비
-        _, X_test_for_tree_on_logit_set = preprocess_data_for_model(
-            X_train_raw=X_train_raw_dt, # Tree 훈련셋 Raw 데이터 (Fit 기준)
-            X_test_raw=X_test_raw_reg, # Logit 테스트셋 Raw 데이터 (Transform 대상)
-            num_cols=num_cols, 
-            cat_cols=cat_cols,
-            is_logit=False # Tree 모델 전처리 방식 (Label Encoding/Imputation) 적용
-        )
+        reg_model = st.session_state.models["logit_model"]     # 분류일 땐 Logit, 회귀일 땐 LinearRegression
+        dt_model  = st.session_state.models["tree_model"]      # 분류일 땐 TreeClassifier, 회귀일 땐 TreeRegressor
+        w         = st.session_state.models["hybrid_weight"]   # Logit 가중치 (0~1)
+        
+        st.info(f"ℹ️ Hybrid 가중치: Logit {w*100:.0f}% + Tree {(1-w)*100:.0f}%")
         
         # ----------------------------------------------------------------------
-        # B. 분류 (Classification) 평가 로직
+        # A. 분류 (Classification) 평가 로직
         # ----------------------------------------------------------------------
-        if st.session_state.task == "logit":
+        if is_classification:
+            # 1. 확률 및 클래스 예측
+            # (1) Logit
+            prob_reg = reg_model.predict_proba(X_test)[:, 1]
+            pred_reg = reg_model.predict(X_test)
             
-            # 1. Logit 모델 예측 (Logit test set 사용)
-            prob_reg = reg_model.predict_proba(X_test_reg)[:, 1]
-            pred_reg = reg_model.predict(X_test_reg)
+            # (2) Tree
+            prob_dt = dt_model.predict_proba(X_test)[:, 1]
+            pred_dt = dt_model.predict(X_test)
             
-            # 2. Tree 모델 예측 (Tree test set 사용, 원래 성능)
-            prob_dt = dt_model.predict_proba(X_test_dt)[:, 1]
-            pred_dt = dt_model.predict(X_test_dt)
-            
-            # 3. Hybrid 모델 예측 (Logit test set에 Logit, Tree 모두 적용 후 가중치 계산)
-            prob_dt_on_reg_test = dt_model.predict_proba(X_test_for_tree_on_logit_set)[:, 1] # 재전처리된 데이터 사용
-            prob_hybrid = (prob_reg * w["regression"]) + (prob_dt_on_reg_test * w["decision_tree"])
+            # (3) Hybrid
+            prob_hybrid = (prob_reg * w) + (prob_dt * (1 - w))
             pred_hybrid = (prob_hybrid >= 0.5).astype(int)
             
+            # 2. 성능 지표 계산 함수
             def get_cls_detailed_metrics(y_true, y_pred, y_prob):
+                fpr, tpr, _ = roc_curve(y_true, y_prob)
                 return {
                     "Accuracy": accuracy_score(y_true, y_pred),
                     "Precision": precision_score(y_true, y_pred, zero_division=0),
                     "Recall": recall_score(y_true, y_pred, zero_division=0),
                     "F1-Score": f1_score(y_true, y_pred, zero_division=0),
-                    "AUC": auc(*roc_curve(y_true, y_prob)[:2])
+                    "AUC": auc(fpr, tpr)
                 }
 
-            metrics_reg = get_cls_detailed_metrics(y_test_reg, pred_reg, prob_reg)
-            metrics_dt = get_cls_detailed_metrics(y_test_dt, pred_dt, prob_dt)
-            metrics_hybrid = get_cls_detailed_metrics(y_test_reg, pred_hybrid, prob_hybrid)
+            metrics_reg     = get_cls_detailed_metrics(y_test, pred_reg, prob_reg)
+            metrics_dt      = get_cls_detailed_metrics(y_test, pred_dt, prob_dt)
+            metrics_hybrid  = get_cls_detailed_metrics(y_test, pred_hybrid, prob_hybrid)
             
-            # 4. 모델별 성능 비교표 출력
+            # 3. 모델별 성능 비교표 출력
             st.markdown("### 1️⃣ 모델별 주요 성능 지표")
-            df_metrics = pd.DataFrame([metrics_reg, metrics_dt, metrics_hybrid], 
-                                     index=["Logit Model (Test size: {:.0f}%, OHE/Scaled)".format(st.session_state.models["test_size_reg"]*100), 
-                                            "Tree Model (Test size: {:.0f}%, LE/Imputed)".format(st.session_state.models["test_size_dt"]*100), 
-                                            "Hybrid Model (Logit Test Set 기준)"])
+            df_metrics = pd.DataFrame(
+                [metrics_reg, metrics_dt, metrics_hybrid], 
+                index=["Logit Model", "Tree Model", "Hybrid Model"]
+            )
             st.table(df_metrics.style.highlight_max(axis=0, color='lightgreen').format("{:.4f}"))
 
-            # 5. ROC Curve 비교 시각화
+            # 4. ROC Curve 비교 시각화
             st.markdown("### 2️⃣ ROC Curve 비교")
             fig_roc = go.Figure()
             def add_roc_trace(y_true, y_prob, name, color):
                 fpr, tpr, _ = roc_curve(y_true, y_prob)
-                fig_roc.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=name, line=dict(color=color, width=2)))
+                fig_roc.add_trace(go.Scatter(
+                    x=fpr, y=tpr, mode='lines', name=name,
+                    line=dict(color=color, width=2)
+                ))
 
-            # ROC Curve는 Logit 테스트셋 기준으로 통일하여 비교
-            add_roc_trace(y_test_reg, reg_model.predict_proba(X_test_reg)[:, 1], "Logit", "blue")
-            add_roc_trace(y_test_reg, prob_dt_on_reg_test, "Tree (on Logit Test)", "green")
-            add_roc_trace(y_test_reg, prob_hybrid, "Hybrid", "red")
+            add_roc_trace(y_test, prob_reg,    "Logit",  "blue")
+            add_roc_trace(y_test, prob_dt,     "Tree",   "green")
+            add_roc_trace(y_test, prob_hybrid, "Hybrid", "red")
             
-            fig_roc.add_shape(type='line', line=dict(dash='dash', color='gray'), x0=0, x1=1, y0=0, y1=1)
-            fig_roc.update_layout(xaxis_title="False Positive Rate", yaxis_title="True Positive Rate", title="ROC Curves (Logit Test Set 기준)")
-            st.plotly_chart(fig_roc, width='stretch')
+            fig_roc.add_shape(
+                type='line',
+                line=dict(dash='dash', color='gray'),
+                x0=0, x1=1, y0=0, y1=1
+            )
+            fig_roc.update_layout(
+                xaxis_title="False Positive Rate",
+                yaxis_title="True Positive Rate",
+                title="ROC Curves"
+            )
+            st.plotly_chart(fig_roc, use_container_width=True)
 
-            # 6. Confusion Matrix (혼동 행렬) 시각화
+            # 5. Confusion Matrix (혼동 행렬) 시각화
             st.markdown("### 3️⃣ Confusion Matrix (혼동 행렬)")
-            st.caption("각 모델이 정답을 어떻게 맞추고 틀렸는지 시각적으로 확인합니다. (Hybrid는 Logit Test Set 기준)")
+            st.caption("각 모델이 정답을 어떻게 맞추고 틀렸는지 시각적으로 확인합니다.")
             
             cm_col1, cm_col2, cm_col3 = st.columns(3)
             
             def plot_confusion_matrix(y_true, y_pred, title):
                 cm = confusion_matrix(y_true, y_pred)
-                fig = px.imshow(cm, text_auto=True, color_continuous_scale='Blues',
-                                 labels=dict(x="Predicted", y="Actual", color="Count"),
-                                 x=['0 (Neg)', '1 (Pos)'], y=['0 (Neg)', '1 (Pos)'])
-                fig.update_layout(title=title, width=300, height=300, margin=dict(l=20, r=20, t=40, b=20))
+                fig = px.imshow(
+                    cm, text_auto=True, color_continuous_scale='Blues',
+                    labels=dict(x="Predicted", y="Actual", color="Count"),
+                    x=['0 (Neg)', '1 (Pos)'], y=['0 (Neg)', '1 (Pos)']
+                )
+                fig.update_layout(
+                    title=title,
+                    width=300, height=300,
+                    margin=dict(l=20, r=20, t=40, b=20)
+                )
                 return fig
 
             with cm_col1:
-                st.plotly_chart(plot_confusion_matrix(y_test_reg, pred_reg, "Logit Model"), use_container_width=True)
+                st.plotly_chart(
+                    plot_confusion_matrix(y_test, pred_reg, "Logit Model"),
+                    use_container_width=True
+                )
             with cm_col2:
-                # Tree 모델은 Logit 테스트셋으로 예측한 결과를 보여줌
-                pred_dt_on_reg_test = dt_model.predict(X_test_for_tree_on_logit_set)
-                st.plotly_chart(plot_confusion_matrix(y_test_reg, pred_dt_on_reg_test, "Tree Model (on Logit Test)"), use_container_width=True)
+                st.plotly_chart(
+                    plot_confusion_matrix(y_test, pred_dt, "Tree Model"),
+                    use_container_width=True
+                )
             with cm_col3:
-                st.plotly_chart(plot_confusion_matrix(y_test_reg, pred_hybrid, "Hybrid Model"), use_container_width=True)
+                st.plotly_chart(
+                    plot_confusion_matrix(y_test, pred_hybrid, "Hybrid Model"),
+                    use_container_width=True
+                )
 
         # ----------------------------------------------------------------------
-        # C. 회귀 (Regression) 평가 로직
+        # B. 회귀 (Regression) 평가 로직
         # ----------------------------------------------------------------------
         else:
-            # 1. Logit 모델 예측
-            pred_reg = reg_model.predict(X_test_reg)
-            # 2. Tree 모델 예측 (원래 성능)
-            pred_dt = dt_model.predict(X_test_dt)
+            # 1. 예측값 계산
+            pred_reg     = reg_model.predict(X_test)
+            pred_dt      = dt_model.predict(X_test)
+            pred_hybrid  = (pred_reg * w) + (pred_dt * (1 - w))
             
-            # 3. Hybrid 모델 예측
-            pred_dt_on_reg_test = dt_model.predict(X_test_for_tree_on_logit_set) # 재전처리된 데이터 사용
-            pred_hybrid = (pred_reg * w["regression"]) + (pred_dt_on_reg_test * w["decision_tree"])
-            
+            # 2. 성능 지표 함수
             def get_reg_metrics(y_true, y_pred):
                 return {
                     "MAE": mean_absolute_error(y_true, y_pred),
@@ -695,18 +699,25 @@ elif st.session_state.step == 4:
                     "R²": r2_score(y_true, y_pred)
                 }
             
-            m1 = get_reg_metrics(y_test_reg, pred_reg)
-            m2 = get_reg_metrics(y_test_dt, pred_dt)
-            m3 = get_reg_metrics(y_test_reg, pred_hybrid)
+            m1 = get_reg_metrics(y_test, pred_reg)
+            m2 = get_reg_metrics(y_test, pred_dt)
+            m3 = get_reg_metrics(y_test, pred_hybrid)
             
             st.markdown("### 1️⃣ 회귀 모델 성능 지표")
-            df_reg = pd.DataFrame([m1, m2, m3], 
-                                  index=["Logit (Test size: {:.0f}%, OHE/Scaled)".format(st.session_state.models["test_size_reg"]*100), 
-                                         "Tree (Test size: {:.0f}%, LE/Imputed)".format(st.session_state.models["test_size_dt"]*100), 
-                                         "Hybrid (Logit Test Set 기준)"])
+            df_reg = pd.DataFrame([m1, m2, m3], index=["Linear(전 Logit 자리)", "Tree", "Hybrid"])
             st.table(df_reg.style.format("{:.4f}"))
             
-            st.markdown("### 2️⃣ 예측값 vs 실제값 비교 (Hybrid Model)")
-            fig = px.scatter(x=y_test_reg, y=pred_hybrid, title="Hybrid 예측 결과 (Logit Test Set 기준)", labels={'x':'실제값', 'y':'예측값'})
-            fig.add_shape(type='line', line=dict(dash='dash', color='red'), x0=y_test_reg.min(), x1=y_test_reg.max(), y0=y_test_reg.min(), y1=y_test_reg.max())
-            st.plotly_chart(fig, width='stretch')
+            st.markdown("### 2️⃣ 예측값 vs 실제값 비교 (Hybrid)")
+            fig = px.scatter(
+                x=y_test, y=pred_hybrid,
+                title="Hybrid 예측 결과",
+                labels={'x':'실제값', 'y':'예측값'}
+            )
+            fig.add_shape(
+                type='line',
+                line=dict(dash='dash', color='red'),
+                x0=y_test.min(), x1=y_test.max(),
+                y0=y_test.min(), y1=y_test.max()
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
