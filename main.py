@@ -351,7 +351,7 @@ elif st.session_state.step == 2:
                     st.success(f"최종 {len(selected_features)}개 변수가 확정되었습니다. '모델 학습' 탭으로 이동하세요!")
 
 # ==============================================================================
-#  단계 3：모델 학습 (수정됨: 학습 속도 개선을 위한 샘플링 옵션 추가)
+#  단계 3：모델 학습
 # ==============================================================================
 elif st.session_state.step == 3:
     st.subheader("🚀 모델 학습 설정")
@@ -569,10 +569,15 @@ elif st.session_state.step == 4:
             pred_l = model_l.predict(X_test_l)
             pred_t = model_t.predict(X_test_t)
 
+            # -------------------------------------------------------
+            # [수정] 평가 지표에 Accuracy, Recall, Precision 추가
+            # -------------------------------------------------------
             def get_metrics(y_true, y_pred, y_prob):
                 return {
-                    "Acc": accuracy_score(y_true, y_pred),
-                    "F1": f1_score(y_true, y_pred, zero_division=0),
+                    "Accuracy": accuracy_score(y_true, y_pred),
+                    "Precision": precision_score(y_true, y_pred, zero_division=0),
+                    "Recall": recall_score(y_true, y_pred, zero_division=0),
+                    "F1 Score": f1_score(y_true, y_pred, zero_division=0),
                     "AUC": auc(*roc_curve(y_true, y_prob)[:2])
                 }
             
