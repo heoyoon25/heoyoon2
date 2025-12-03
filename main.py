@@ -351,7 +351,7 @@ elif st.session_state.step == 2:
                     st.success(f"최종 {len(selected_features)}개 변수가 확정되었습니다. '모델 학습' 탭으로 이동하세요!")
 
 # ==============================================================================
-#  단계 3：모델 학습
+#  단계 3：모델 학습 (수정됨: 학습 속도 개선을 위한 샘플링 옵션 추가)
 # ==============================================================================
 elif st.session_state.step == 3:
     st.subheader("🚀 모델 학습 설정")
@@ -369,6 +369,7 @@ elif st.session_state.step == 3:
 
         st.divider()
 
+        # 변수 선택 상태 초기화
         if "selected_logit_features" not in st.session_state:
             st.session_state.selected_logit_features = list(X.columns)
         if "selected_tree_features" not in st.session_state:
@@ -377,20 +378,19 @@ elif st.session_state.step == 3:
         col_conf1, col_conf2 = st.columns(2)
 
         # -------------------------------------------------------------
-        # A. Logit / Stepwise 설정 (속도 개선 적용됨)
+        # A. Logit / Stepwise 설정
         # -------------------------------------------------------------
         with col_conf1:
             st.markdown("#### 🔹 Logit / Linear & Stepwise")
             with st.expander("설정 열기", expanded=True):
-                # Stepwise 버튼
+                # Stepwise 버튼 (샘플링 적용됨)
                 if st.button("Stepwise 변수 선택 (Auto)", help="속도를 위해 데이터 일부를 샘플링하여 변수를 선택합니다."):
-                    with st.spinner("Stepwise(Forward) 진행 중... (데이터 양에 따라 시간이 걸릴 수 있습니다)"):
+                    with st.spinner("Stepwise(Forward) 진행 중..."):
                         try:
                             # 1. 속도 개선을 위한 샘플링
                             if len(X) > 2000:
                                 X_sample = X.sample(n=2000, random_state=42)
                                 y_sample = y.loc[X_sample.index]
-                                st.caption("🚀 속도 향상을 위해 2,000개의 표본 데이터로 변수를 선택했습니다.")
                             else:
                                 X_sample = X
                                 y_sample = y
@@ -402,10 +402,9 @@ elif st.session_state.step == 3:
                                 est, 
                                 n_features_to_select='auto', 
                                 direction='forward',
-                                cv=3,  # 교차검증 횟수 단축
-                                n_jobs=-1 # 병렬 처리
+                                cv=3,
+                                n_jobs=-1
                             )
-                            
                             sfs.fit(X_sample, y_sample)
                             
                             selected_mask = sfs.get_support()
@@ -438,7 +437,7 @@ elif st.session_state.step == 3:
             st.markdown("#### 🌳 Decision Tree (CART)")
             with st.expander("설정 열기", expanded=True):
                 # CART Selection 버튼
-                if st.button("Decision Tree(CART) 변수 선택 (Auto)", help="트리 중요도(Feature Importance) 기반 상위 변수 선택"):
+                if st.button("Decision Tree(CART) 변수 선택 (Auto)"):
                     with st.spinner("CART 변수 중요도 분석 중..."):
                         try:
                             est_tree = DecisionTreeClassifier(random_state=42) if is_classification else DecisionTreeRegressor(random_state=42)
@@ -463,26 +462,53 @@ elif st.session_state.step == 3:
                 tree_depth = st.slider("Max Depth", 2, 20, 6)
 
         st.divider()
-        st.markdown("#### ⚖ Hybrid 가중치")
-        reg_weight = st.slider("Logit 가중치 (나머지는 Tree)", 0.0, 1.0, 0.5)
+        st.markdown("#### ⚖ Hybrid 가중치 및 학습 옵션")
+        
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            reg_weight = st.slider("Logit 가중치 (나머지는 Tree)", 0.0, 1.0, 0.5)
+        with col_opt2:
+            # 🚀 빠른 학습 모드 체크박스
+            use_fast_mode = st.checkbox("🚀 빠른 학습 모드 사용 (최대 5,000개 샘플링)", value=True, help="데이터가 많으면 학습이 오래 걸릴 수 있습니다. 체크 시 5,000개만 사용하여 빠르게 결과를 확인합니다.")
 
         # -------------------------------------------------------------
         # 학습 시작
         # -------------------------------------------------------------
+        st.divider()
         if st.button("🏁 모델 학습 시작 (최종 선택 변수 적용)", type="primary"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             try:
+                # 0. 데이터 샘플링 적용
+                if use_fast_mode and len(X) > 5000:
+                    status_text.text("⚡ 데이터가 많아 5,000개만 샘플링하여 학습합니다...")
+                    X_used = X.sample(n=5000, random_state=42)
+                    y_used = y.loc[X_used.index]
+                else:
+                    status_text.text("📦 전체 데이터를 사용하여 학습합니다...")
+                    X_used = X
+                    y_used = y
+                
+                progress_bar.progress(20)
+
                 # 1. Logit 데이터셋 준비
-                X_logit = X[final_logit_feats]
+                X_logit = X_used[final_logit_feats]
                 X_train_l, X_test_l, y_train_l, y_test_l = train_test_split(
-                    X_logit, y, test_size=test_size_logit, random_state=42, stratify=y if is_classification else None
+                    X_logit, y_used, test_size=test_size_logit, random_state=42, stratify=y_used if is_classification else None
                 )
+                
+                progress_bar.progress(40)
                 
                 # 2. Tree 데이터셋 준비
-                X_tree = X[final_tree_feats]
+                X_tree = X_used[final_tree_feats]
                 X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(
-                    X_tree, y, test_size=test_size_tree, random_state=42, stratify=y if is_classification else None
+                    X_tree, y_used, test_size=test_size_tree, random_state=42, stratify=y_used if is_classification else None
                 )
                 
+                progress_bar.progress(60)
+                status_text.text("🤖 모델 학습 중...")
+
                 # 3. 모델 정의 및 학습
                 if is_classification:
                     model_l = LogisticRegression(C=C_logit, max_iter=1000)
@@ -493,6 +519,9 @@ elif st.session_state.step == 3:
 
                 model_l.fit(X_train_l, y_train_l)
                 model_t.fit(X_train_t, y_train_t)
+
+                progress_bar.progress(90)
+                status_text.text("💾 결과 저장 중...")
 
                 st.session_state.models["logit_model"] = model_l
                 st.session_state.models["tree_model"] = model_t
@@ -505,7 +534,9 @@ elif st.session_state.step == 3:
                     "X_test_tree": X_tree.loc[X_test_l.index] 
                 }
 
-                st.success("학습 완료! 성능 평가 페이지로 이동하세요.")
+                progress_bar.progress(100)
+                status_text.success("✅ 학습 완료! 성능 평가 페이지로 이동하세요.")
+                
             except Exception as e:
                 st.error(f"학습 중 오류: {e}")
 
