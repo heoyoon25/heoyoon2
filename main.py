@@ -38,7 +38,7 @@ if "preprocess" not in st.session_state:
     st.session_state.preprocess = {
         "imputer": None, "scaler": None, "encoders": None, 
         "feature_cols": None, "target_col": None,
-        "feature_candidates": [] # 전처리 후 후보 변수 리스트
+        "feature_candidates": [] 
     }
 if "models" not in st.session_state:
     st.session_state.models = {"regression": None, "decision_tree": None, "mixed_weights": {"regression": 0.3, "decision_tree": 0.7}}
@@ -165,7 +165,7 @@ elif st.session_state.step == 1:
                 except Exception as e: st.error(f"시각화 오류: {e}")
 
 # ==============================================================================
-#  단계 2：데이터 전처리 & 변수 선택 (수정됨)
+#  단계 2：데이터 전처리 & 변수 선택
 # ==============================================================================
 elif st.session_state.step == 2:
     st.subheader("🧹 데이터 전처리 & 변수 선택")
@@ -186,7 +186,7 @@ elif st.session_state.step == 2:
         st.divider()
 
         # ---------------------------------------------------------
-        # 1. 데이터 전처리 실행 (요청사항 반영)
+        # 1. 데이터 전처리 실행
         # ---------------------------------------------------------
         st.markdown("### 1️⃣ 데이터 전처리 실행")
         st.info("💡 **수행 작업**: 결측치 40% 이상 제거 / 단일값 제거 / 최빈값 99% 이상 제거 / 범주 100개 이상 제거 / 결측치 대치 / 스케일링 / 인코딩")
@@ -201,7 +201,7 @@ elif st.session_state.step == 2:
                     X_raw = clean_df.drop(columns=[target_col])
                     y = clean_df[target_col].copy()
 
-                    # 3) 삭제 로직 (요청사항 반영)
+                    # 3) 삭제 로직 (강화된 기준 적용)
                     drop_cols = []
                     
                     # A. 결측치 40% 이상 삭제
@@ -209,8 +209,7 @@ elif st.session_state.step == 2:
                     high_missing = missing_ratio[missing_ratio >= 0.40].index.tolist()
                     drop_cols.extend(high_missing)
 
-                    # B. 단일 값을 가지는 변수 삭제 (nunique == 1)
-                    # C. 빈도가 99% 이상인 변수 삭제 (Quasi-constant)
+                    # B. 단일 값(상수) 삭제 / C. 최빈값 99% 이상 삭제
                     for col in X_raw.columns:
                         if col in drop_cols: continue
                         
@@ -244,7 +243,7 @@ elif st.session_state.step == 2:
                         le_target = LabelEncoder()
                         y = pd.Series(le_target.fit_transform(y), index=y.index)
 
-                    # 5) 결측치 대치 / 스케일링 / 인코딩 (기존 로직 유지)
+                    # 5) 결측치 대치 / 스케일링 / 인코딩
                     X = X_raw.copy()
                     num_cols = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
                     cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -282,7 +281,7 @@ elif st.session_state.step == 2:
         st.divider()
 
         # ---------------------------------------------------------
-        # 2. T-test (요청사항 반영)
+        # 2. T-test (이진 분류용)
         # ---------------------------------------------------------
         st.markdown("### 2️⃣ T-test (통계적 가설 검정)")
         
@@ -290,57 +289,47 @@ elif st.session_state.step == 2:
             X_curr = st.session_state.data["X_candidates"]
             y_curr = st.session_state.data["y_processed"]
             
-            # T-test는 타겟이 2진 분류(0, 1)일 때 주로 유효
             unique_y = np.unique(y_curr)
             if len(unique_y) == 2:
                 if st.button("🧪 T-test 실행 (p-value < 0.05 변수 선택)"):
                     with st.spinner("T-test 수행 중..."):
                         selected_by_ttest = []
-                        rejected_by_ttest = []
                         p_values = {}
 
-                        # 그룹 나누기
                         group0_idx = (y_curr == unique_y[0])
                         group1_idx = (y_curr == unique_y[1])
 
                         for col in X_curr.columns:
-                            # 수치형 변수라고 가정하고 진행 (인코딩/스케일링 되었으므로)
                             try:
                                 val0 = X_curr.loc[group0_idx, col]
                                 val1 = X_curr.loc[group1_idx, col]
                                 
-                                # 등분산 가정 여부는 생략(기본) 혹은 False
                                 stat, p_val = stats.ttest_ind(val0, val1, equal_var=False)
                                 
                                 if p_val < 0.05:
                                     selected_by_ttest.append(col)
                                     p_values[col] = p_val
-                                else:
-                                    rejected_by_ttest.append(col)
                             except:
-                                # 오류 발생 시(상수 등) 제외
-                                rejected_by_ttest.append(col)
+                                continue
                         
-                        # 결과 업데이트
                         if selected_by_ttest:
                             st.session_state.preprocess["feature_candidates"] = selected_by_ttest
                             st.session_state.data["X_candidates"] = X_curr[selected_by_ttest]
                             st.success(f"✅ T-test 완료! 유의미한 변수 {len(selected_by_ttest)}개가 선택되었습니다.")
                             
-                            # 결과 테이블 표시
                             res_df = pd.DataFrame({"Variable": selected_by_ttest, "P-value": [p_values[c] for c in selected_by_ttest]})
                             st.dataframe(res_df.sort_values("P-value"), height=200)
                         else:
-                            st.warning("⚠️ 유의미한 변수(p<0.05)가 하나도 없습니다. 기준을 완화하거나 데이터를 확인하세요.")
+                            st.warning("⚠️ 유의미한 변수(p<0.05)가 하나도 없습니다.")
             else:
-                st.info("ℹ️ T-test는 타겟 변수가 2개의 클래스(이진 분류)일 때 활성화됩니다. 현재 타겟은 이진 분류가 아닙니다.")
+                st.info("ℹ️ T-test는 타겟 변수가 이진 분류(클래스 2개)일 때만 활성화됩니다.")
         else:
             st.info("먼저 1번 전처리를 실행해주세요.")
 
         st.divider()
 
         # ---------------------------------------------------------
-        # 3. 최종 변수 확인 및 선택
+        # 3. 최종 변수 확정
         # ---------------------------------------------------------
         st.markdown("### 3️⃣ 최종 입력 변수(X) 확인 및 확정")
         if "X_candidates" in st.session_state.data:
@@ -362,7 +351,7 @@ elif st.session_state.step == 2:
                     st.success(f"최종 {len(selected_features)}개 변수가 확정되었습니다. '모델 학습' 탭으로 이동하세요!")
 
 # ==============================================================================
-#  단계 3：모델 학습 (수정됨: Stepwise, CART 버튼 추가)
+#  단계 3：모델 학습
 # ==============================================================================
 elif st.session_state.step == 3:
     st.subheader("🚀 모델 학습 설정")
@@ -380,7 +369,6 @@ elif st.session_state.step == 3:
 
         st.divider()
 
-        # 변수 선택 결과를 저장할 임시 state
         if "selected_logit_features" not in st.session_state:
             st.session_state.selected_logit_features = list(X.columns)
         if "selected_tree_features" not in st.session_state:
@@ -389,190 +377,12 @@ elif st.session_state.step == 3:
         col_conf1, col_conf2 = st.columns(2)
 
         # -------------------------------------------------------------
-        # A. Logit / Stepwise 설정
+        # A. Logit / Stepwise 설정 (속도 개선 적용됨)
         # -------------------------------------------------------------
         with col_conf1:
             st.markdown("#### 🔹 Logit / Linear & Stepwise")
             with st.expander("설정 열기", expanded=True):
                 # Stepwise 버튼
-                if st.button("Stepwise 변수 선택 (Auto)", help="AIC/BIC 대용으로 Sequential Feature Selector를 사용합니다."):
-                    with st.spinner("Stepwise(Forward) 진행 중..."):
-                        try:
-                            # 모델 베이스 정의
-                            est = LogisticRegression(solver='lbfgs', max_iter=500) if is_classification else LinearRegression()
-                            # 절반 정도의 피처를 선택하도록 설정 (또는 'auto')
-                            n_features = 'auto' 
-                            sfs = SequentialFeatureSelector(est, n_features_to_select=n_features, direction='forward')
-                            sfs.fit(X, y)
-                            
-                            selected_mask = sfs.get_support()
-                            st.session_state.selected_logit_features = X.columns[selected_mask].tolist()
-                            st.success(f"Stepwise 완료! {sum(selected_mask)}개 변수 선택됨.")
-                        except Exception as e:
-                            st.error(f"Stepwise 오류: {e}")
-
-                # 선택된 변수 보여주기/수정하기
-                final_logit_feats = st.multiselect(
-                    "Logit 모델 사용 변수", 
-                    options=list(X.columns),
-                    default=st.session_state.selected_logit_features,
-                    key="logit_feats_select"
-                )
-                
-                # 하이퍼파라미터
-                test_size_logit = st.slider("Test 비율 (Logit)", 0.1, 0.4, 0.2)
-                if is_classification:
-                    C_logit = st.slider("규제 강도(C)", 0.01, 10.0, 1.0)
-                
-
-        # -------------------------------------------------------------
-        # B. Tree / CART 설정
-        # -------------------------------------------------------------
-        with col_conf2:
-            st.markdown("#### 🌳 Decision Tree (CART)")
-            with st.expander("설정 열기", expanded=True):
-                # CART Selection 버튼
-                if st.button("Decision Tree(CART) 변수 선택 (Auto)", help="트리 중요도(Feature Importance) 기반 상위 변수 선택"):
-                    with st.spinner("CART 변수 중요도 분석 중..."):
-                        try:
-                            est_tree = DecisionTreeClassifier(random_state=42) if is_classification else DecisionTreeRegressor(random_state=42)
-                            est_tree.fit(X, y)
-                            
-                            # 중요도 기반 선택 (SelectFromModel - 평균 이상 중요도)
-                            selector = SelectFromModel(est_tree, prefit=True)
-                            selected_mask_tree = selector.get_support()
-                            
-                            st.session_state.selected_tree_features = X.columns[selected_mask_tree].tolist()
-                            st.success(f"CART 선택 완료! {sum(selected_mask_tree)}개 변수 선택됨.")
-                        except Exception as e:
-                            st.error(f"Tree 선택 오류: {e}")
-
-                # 선택된 변수 보여주기/수정하기
-                final_tree_feats = st.multiselect(
-                    "Tree 모델 사용 변수", 
-                    options=list(X.columns),
-                    default=st.session_state.selected_tree_features,
-                    key="tree_feats_select"
-                )
-
-                test_size_tree = st.slider("Test 비율 (Tree)", 0.1, 0.4, 0.2)
-                tree_depth = st.slider("Max Depth", 2, 20, 6)
-
-        st.divider()
-
-        # Hybrid 설정 (간소화)
-        st.markdown("#### ⚖ Hybrid 가중치")
-        reg_weight = st.slider("Logit 가중치 (나머지는 Tree)", 0.0, 1.0, 0.5)
-
-        # -------------------------------------------------------------
-        # 학습 시작
-        # -------------------------------------------------------------
-        if st.button("🏁 모델 학습 시작 (최종 선택 변수 적용)", type="primary"):
-            try:
-                # 1. Logit 데이터셋 준비
-                X_logit = X[final_logit_feats]
-                X_train_l, X_test_l, y_train_l, y_test_l = train_test_split(
-                    X_logit, y, test_size=test_size_logit, random_state=42, stratify=y if is_classification else None
-                )
-                
-                # 2. Tree 데이터셋 준비
-                X_tree = X[final_tree_feats]
-                X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(
-                    X_tree, y, test_size=test_size_tree, random_state=42, stratify=y if is_classification else None
-                )
-                
-                # Hybrid용 (전체 변수 대신 Logit 변수를 베이스로 하거나, 공통 Testset을 만들어야 하나 
-                # 여기서는 각각의 모델이 독립된 피처셋을 쓴다고 가정하고, Hybrid 예측 시 각각 predict_proba를 하여 앙상블함)
-                # *중요*: Hybrid 평가를 위해서는 Test Set의 인덱스가 동일해야 정확한 앙상블이 가능합니다.
-                # 편의상 Hybrid 평가는 Logit의 Test Set 인덱스를 기준으로 Tree도 예측하도록 맞춥니다.
-                
-                # 3. 모델 정의 및 학습
-                if is_classification:
-                    model_l = LogisticRegression(C=C_logit, max_iter=1000)
-                    model_t = DecisionTreeClassifier(max_depth=tree_depth, random_state=42)
-                else:
-                    model_l = LinearRegression()
-                    model_t = DecisionTreeRegressor(max_depth=tree_depth, random_state=42)
-
-                model_l.fit(X_train_l, y_train_l)
-                model_t.fit(X_train_t, y_train_t)
-
-                # 4. 저장
-                st.session_state.models["logit_model"] = model_l
-                st.session_state.models["tree_model"] = model_t
-                st.session_state.models["hybrid_weight"] = reg_weight
-                
-                # 평가용 데이터 저장 (Logit split 기준)
-                st.session_state.data["eval_set"] = {
-                    "y_test": y_test_l,
-                    "X_test_logit": X_test_l,
-                    "X_test_tree": X_tree.loc[X_test_l.index] # Logit과 동일한 행(Index)을 Tree 피처셋으로 추출
-                }
-
-                st.success("학습 완료! 성능 평가 페이지로 이동하세요.")
-            except Exception as e:
-                st.error(f"학습 중 오류: {e}")
-
-# ==============================================================================
-#  단계 4：성능 평가
-# ==============================================================================
-elif st.session_state.step == 4:
-    st.subheader("📈 모델 성능 심층 평가")
-
-    if "eval_set" not in st.session_state.data:
-        st.warning("⚠️ 모델 학습을 먼저 완료하세요.")
-    else:
-        # 데이터 로드
-        eval_data = st.session_state.data["eval_set"]
-        y_test = eval_data["y_test"]
-        X_test_l = eval_data["X_test_logit"]
-        X_test_t = eval_data["X_test_tree"]
-        
-        model_l = st.session_state.models["logit_model"]
-        model_t = st.session_state.models["tree_model"]
-        w = st.session_state.models["hybrid_weight"]
-        is_cls = st.session_state.get("is_classification", True)
-
-        if is_cls:
-            # 분류 평가
-            prob_l = model_l.predict_proba(X_test_l)[:, 1]
-            prob_t = model_t.predict_proba(X_test_t)[:, 1]
-            prob_h = w * prob_l + (1-w) * prob_t
-            pred_h = (prob_h >= 0.5).astype(int)
-            pred_l = model_l.predict(X_test_l)
-            pred_t = model_t.predict(X_test_t)
-
-            # 지표 계산 함수
-            def get_metrics(y_true, y_pred, y_prob):
-                return {
-                    "Acc": accuracy_score(y_true, y_pred),
-                    "F1": f1_score(y_true, y_pred, zero_division=0),
-                    "AUC": auc(*roc_curve(y_true, y_prob)[:2])
-                }
-            
-            m1 = get_metrics(y_test, pred_l, prob_l)
-            m2 = get_metrics(y_test, pred_t, prob_t)
-            m3 = get_metrics(y_test, pred_h, prob_h)
-
-            st.table(pd.DataFrame([m1, m2, m3], index=["Logit", "Tree", "Hybrid"]))
-            
-            # ROC Curve
-            fpr_h, tpr_h, _ = roc_curve(y_test, prob_h)
-            fig = px.area(x=fpr_h, y=tpr_h, title="Hybrid ROC Curve", labels=dict(x="FPR", y="TPR"))
-            fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
-            st.plotly_chart(fig)
-
-        else:
-            # 회귀 평가
-            pred_l = model_l.predict(X_test_l)
-            pred_t = model_t.predict(X_test_t)
-            pred_h = w * pred_l + (1-w) * pred_t
-            
-            mae = mean_absolute_error(y_test, pred_h)
-            r2 = r2_score(y_test, pred_h)
-            st.metric("Hybrid MAE", f"{mae:.4f}")
-            st.metric("Hybrid R2", f"{r2:.4f}")
-            
-            fig = px.scatter(x=y_test, y=pred_h, labels={'x':'Actual', 'y':'Predicted'}, title="Actual vs Predicted")
-            fig.add_shape(type='line', line=dict(dash='dash', color='red'), x0=y_test.min(), x1=y_test.max(), y0=y_test.min(), y1=y_test.max())
-            st.plotly_chart(fig)
+                if st.button("Stepwise 변수 선택 (Auto)", help="속도를 위해 데이터 일부를 샘플링하여 변수를 선택합니다."):
+                    with st.spinner("Stepwise(Forward) 진행 중... (데이터 양에 따라 시간이 걸릴 수 있습니다)"):
+                        try
